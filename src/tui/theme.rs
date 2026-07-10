@@ -5,6 +5,10 @@ pub mod palette {
     use ratatui::style::Color;
 
     // Base
+    /// Solid app background. Painted explicitly across the whole frame so the
+    /// TUI stays readable under terminal transparency/acrylic settings, which
+    /// would otherwise show through any cell ratatui doesn't paint over.
+    pub const BG: Color = Color::Rgb(26, 27, 38);
     pub const FG: Color = Color::Rgb(192, 202, 245);
     pub const FG_MID: Color = Color::Rgb(140, 148, 190);
     pub const FG_DIM: Color = Color::Rgb(86, 95, 137);

@@ -123,6 +123,16 @@ fn mode_input_bg(app: &App) -> ratatui::style::Color {
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    // Paint a solid background across the whole frame first. Without this,
+    // cells ratatui doesn't otherwise draw over inherit the terminal's own
+    // background — which shows through as terminal transparency/acrylic
+    // settings on Windows Terminal and similar, making the dark palette hard
+    // to read.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette::BG)),
+        frame.area(),
+    );
+
     render_main(frame, app);
 
     render_command_palette(frame, app);
