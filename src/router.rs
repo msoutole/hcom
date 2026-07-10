@@ -716,7 +716,7 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
     }
 
     // Open DB (includes schema migration/compat check)
-    let db = match HcomDb::open() {
+    let mut db = match HcomDb::open() {
         Ok(db) => db,
         Err(e) => {
             eprintln!("Error: Failed to open database: {e}");
@@ -867,7 +867,7 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
             |args| crate::commands::archive::cmd_archive(&db, &args, Some(&ctx))
         ),
         "reset" => clap_dispatch!(crate::commands::reset::ResetArgs, cmd, &cmd_argv, |args| {
-            crate::commands::reset::cmd_reset(&db, &args, Some(&ctx))
+            crate::commands::reset::cmd_reset(&mut db, &args, Some(&ctx))
         }),
         "hooks" => clap_dispatch!(crate::commands::hooks::HooksArgs, cmd, &cmd_argv, |args| {
             crate::commands::hooks::cmd_hooks(&db, &args, Some(&ctx))

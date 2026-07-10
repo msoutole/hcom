@@ -115,6 +115,30 @@ impl HcomDb {
         })
     }
 
+    /// Release the OS handle on the real database file by swapping to an
+    /// in-memory connection. Windows (unlike Unix) refuses to delete or
+    /// replace a file that has an open handle, even from the same process —
+    /// callers that are about to remove/recreate the DB files on disk (e.g.
+    /// `hcom reset`) must release the long-lived CLI connection first.
+    pub fn release_file_handle(&mut self) {
+        if let Ok(mem_conn) = Connection::open_in_memory() {
+            self.conn = mem_conn;
+        }
+    }
+
+    /// Reopen the connection against `db_path`. Pairs with
+    /// `release_file_handle` once the on-disk file has been recreated.
+    pub fn reopen(&mut self) -> Result<()> {
+        let conn = Connection::open(&self.db_path)
+            .with_context(|| format!("Failed to reopen database: {}", self.db_path.display()))?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;",
+        )?;
+        self.conn = conn;
+        self.db_inode = get_inode(&self.db_path);
+        Ok(())
+    }
+
     /// Reconnect if the DB file was replaced (e.g., by hcom reset / schema bump).
     /// Long-lived threads (PTY delivery, listeners) hold an open connection to the
     /// old inode; this moves them onto the new DB file.

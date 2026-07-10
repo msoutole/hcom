@@ -23,12 +23,12 @@ pub struct ResetArgs {
     pub target: Option<ResetTarget>,
 }
 
-pub fn cmd_reset(db: &HcomDb, args: &ResetArgs, ctx: Option<&CommandContext>) -> i32 {
+pub fn cmd_reset(db: &mut HcomDb, args: &ResetArgs, ctx: Option<&CommandContext>) -> i32 {
     let target = args.target;
 
     // Confirmation gate: inside AI tools, require --go
     if is_inside_ai_tool() && !ctx.map(|c| c.go).unwrap_or(false) {
-        super::reset_preview::print_reset_preview(target, db);
+        super::reset_preview::print_reset_preview(target, &*db);
         return 0;
     }
 
@@ -43,13 +43,18 @@ pub fn cmd_reset(db: &HcomDb, args: &ResetArgs, ctx: Option<&CommandContext>) ->
     let stop_args = crate::commands::stop::StopArgs {
         targets: vec!["all".into()],
     };
-    exit_codes.push(crate::commands::stop::cmd_stop(db, &stop_args, ctx));
+    exit_codes.push(crate::commands::stop::cmd_stop(&*db, &stop_args, ctx));
 
     // Stop relay daemon if running before clear
     let _ = crate::commands::daemon::daemon_stop();
 
     // Clean temp files
     super::reset_ops::clean_temp_files();
+
+    // Release our own handle on hcom.db/-wal/-shm first — Windows refuses to
+    // delete a file with an open handle, even from the same process, and
+    // this connection stays open for the whole CLI invocation (router.rs).
+    db.release_file_handle();
 
     // Archive and clear database
     let archive_exit =
@@ -65,6 +70,10 @@ pub fn cmd_reset(db: &HcomDb, args: &ResetArgs, ctx: Option<&CommandContext>) ->
 
     // Log reset event to fresh DB
     super::reset_ops::bootstrap_fresh_db();
+
+    // Reopen against the freshly-bootstrapped file so callers after us
+    // (e.g. post-command pending-message delivery) see real state again.
+    let _ = db.reopen();
 
     // Respawn relay worker (was stopped above) and push reset event to remote devices.
     // ensure_worker re-reads config, so this is a no-op when relay is not configured.
