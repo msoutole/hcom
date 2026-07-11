@@ -540,6 +540,97 @@ fn kill_tree_win_checked(root: u32) -> (GroupSignal, bool) {
     (GroupSignal::Sent, root_terminated)
 }
 
+/// Convert a process exit status to an exit code, handling Unix signal+128
+/// convention. On Unix, when a process is killed by a signal and has no exit
+/// code, returns `128 + signal`. On other platforms, returns `status.code()`.
+#[cfg(unix)]
+pub fn exit_code_from_status(status: std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(code) = status.code() {
+        code
+    } else if let Some(signal) = status.signal() {
+        128 + signal
+    } else {
+        1
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+pub fn exit_code_from_status(status: std::process::ExitStatus) -> Option<i32> {
+    status.code()
+}
+
+/// Find Git Bash on Windows. Returns the path to `bash.exe` or an error
+/// explaining how to install Git Bash.
+#[cfg(windows)]
+pub fn resolve_git_bash() -> Result<String, String> {
+    let bash = crate::terminal::which_bin("bash").ok_or_else(|| BASH_MISSING_MSG.to_string())?;
+    match std::process::Command::new(&bash).arg("--version").output() {
+        Ok(output) if output.status.success() => Ok(bash),
+        Ok(_) => Err(format!(
+            "{BASH_MISSING_MSG}\nFound `{bash}`, but it is not a working Bash installation \
+             (the Windows WSL launcher is not sufficient)."
+        )),
+        Err(err) => Err(format!(
+            "{BASH_MISSING_MSG}\nFound `{bash}`, but it could not be executed: {err}"
+        )),
+    }
+}
+#[cfg(windows)]
+const BASH_MISSING_MSG: &str = "Git Bash required to run shell (.sh) workflow scripts — install it and ensure `bash` is on PATH.";
+
+/// Find a working Python command. Checks `$PYTHON` first, then probes
+/// `python` and `py -3` on Windows, or returns `python3` on Unix.
+pub fn python_command() -> Result<std::process::Command, String> {
+    if let Ok(program) = std::env::var("PYTHON")
+        && !program.trim().is_empty()
+    {
+        return Ok(std::process::Command::new(program));
+    }
+
+    #[cfg(windows)]
+    {
+        for (name, args) in [("python", &[][..]), ("py", &["-3"][..])] {
+            let Some(program) = crate::terminal::which_bin(name) else {
+                continue;
+            };
+            let mut probe = std::process::Command::new(&program);
+            probe.args(args).arg("--version");
+            if probe.output().is_ok_and(|output| output.status.success()) {
+                let mut command = std::process::Command::new(program);
+                command.args(args);
+                return Ok(command);
+            }
+        }
+        Err(
+            "Python 3 is required to run .py workflow scripts. Install Python, set `PYTHON`, \
+             or ensure `python`/`py` is on PATH."
+                .to_string(),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(std::process::Command::new("python3"))
+    }
+}
+
+/// Get the default shell path. Checks `$SHELL` first, then falls back to
+/// `/bin/zsh` on macOS and `/bin/bash` elsewhere.
+pub fn shell_path() -> Option<std::path::PathBuf> {
+    if let Some(shell) = std::env::var_os("SHELL").filter(|s| !s.is_empty()) {
+        return Some(std::path::PathBuf::from(shell));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(std::path::PathBuf::from("/bin/zsh"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(std::path::PathBuf::from("/bin/bash"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

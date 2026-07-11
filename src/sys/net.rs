@@ -4,6 +4,34 @@
 use std::net::TcpListener;
 use std::time::Duration;
 
+/// Send a JSON request to a Unix domain socket and read the response line.
+///
+/// Returns `Ok(())` on success. The response body is discarded — this is a
+/// fire-and-forget label push, not a request/reply.
+#[cfg(unix)]
+pub fn send_unix_request(socket_path: &str, request: &serde_json::Value) -> Result<(), String> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let socket_timeout = std::time::Duration::from_millis(200);
+    let mut stream =
+        UnixStream::connect(socket_path).map_err(|e| format!("connect: {socket_path}: {e}"))?;
+    let _ = stream.set_read_timeout(Some(socket_timeout));
+    let _ = stream.set_write_timeout(Some(socket_timeout));
+    writeln!(stream, "{request}").map_err(|e| format!("write: {e}"))?;
+    let mut response = String::new();
+    BufReader::new(&stream)
+        .read_line(&mut response)
+        .map_err(|e| format!("read: {e}"))?;
+    Ok(())
+}
+
+/// Stub for non-Unix platforms.
+#[cfg(not(unix))]
+pub fn send_unix_request(_socket_path: &str, _request: &serde_json::Value) -> Result<(), String> {
+    Err("unix sockets unavailable on this platform".into())
+}
+
 /// Block until `listener` has an incoming connection ready to accept, or
 /// `timeout` elapses. Returns true if readable, false on timeout.
 ///

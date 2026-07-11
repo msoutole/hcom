@@ -165,17 +165,9 @@ fn refresh_title_state(args: TitleRefresh<'_>) {
 /// whose chrome doesn't render OSC titles. Currently only herdr; add a
 /// `Backend` variant and a `resolve` arm to support another.
 mod host_label {
-    #[cfg(unix)]
-    use std::time::Duration;
-
     use crate::db::HcomDb;
     use crate::identity;
     use crate::shared::format_pane_title;
-
-    /// Long enough to absorb a slow herdr server tick, short enough that a
-    /// dead socket doesn't visibly stall the delivery loop.
-    #[cfg(unix)]
-    const SOCKET_TIMEOUT: Duration = Duration::from_millis(200);
 
     /// Per-loop state: which backend (if any) we resolved at startup, and the
     /// last label we successfully pushed (for dedupe). On the first I/O error
@@ -274,7 +266,7 @@ mod host_label {
                         "method": "pane.rename",
                         "params": { "pane_id": pane_id, "label": label },
                     });
-                    send_unix_request(socket_path, &request)
+                    crate::sys::net::send_unix_request(socket_path, &request)
                 }
             }
         }
@@ -284,28 +276,6 @@ mod host_label {
     fn pane_title_label(db: &HcomDb, name: &str, status: &str, tool: &str) -> String {
         let display = identity::get_display_name(db, name);
         format_pane_title(status, &display, tool)
-    }
-
-    #[cfg(unix)]
-    fn send_unix_request(socket_path: &str, request: &serde_json::Value) -> Result<(), String> {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::unix::net::UnixStream;
-
-        let mut stream =
-            UnixStream::connect(socket_path).map_err(|e| format!("connect: {socket_path}: {e}"))?;
-        let _ = stream.set_read_timeout(Some(SOCKET_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(SOCKET_TIMEOUT));
-        writeln!(stream, "{request}").map_err(|e| format!("write: {e}"))?;
-        let mut response = String::new();
-        BufReader::new(&stream)
-            .read_line(&mut response)
-            .map_err(|e| format!("read: {e}"))?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    fn send_unix_request(_socket_path: &str, _request: &serde_json::Value) -> Result<(), String> {
-        Err("unix sockets unavailable on this platform".into())
     }
 
     #[cfg(test)]

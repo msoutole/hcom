@@ -59,7 +59,7 @@ fn resolve_shell_env_uncached() -> Option<HashMap<String, String>> {
     if cfg!(windows) {
         return None;
     }
-    let shell = shell_path()?;
+    let shell = crate::sys::process::shell_path()?;
     if unsupported_shell(&shell) {
         return None;
     }
@@ -68,20 +68,6 @@ fn resolve_shell_env_uncached() -> Option<HashMap<String, String>> {
     let cmd = format!("printf %s \"${MARKER_VAR}\"; env -0; printf %s \"${MARKER_VAR}\"");
     let output = timed_shell_output(&shell, &cmd, &marker)?;
     parse_shell_env_output(&output.stdout, &marker, MARKER_VAR)
-}
-
-fn shell_path() -> Option<PathBuf> {
-    if let Some(shell) = std::env::var_os("SHELL").filter(|s| !s.is_empty()) {
-        return Some(PathBuf::from(shell));
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Some(PathBuf::from("/bin/zsh"))
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Some(PathBuf::from("/bin/bash"))
-    }
 }
 
 fn unsupported_shell(shell: &Path) -> bool {
@@ -437,7 +423,7 @@ mod tests {
             .into_iter()
             .map(PathBuf::from)
             .find(|path| path.exists())
-            .or_else(shell_path)
+            .or_else(crate::sys::process::shell_path)
             .expect("a POSIX-compatible shell is required for this test")
     }
 

@@ -14,56 +14,6 @@ use crate::paths::scripts_dir;
 use crate::scripts;
 use crate::shared::CommandContext;
 
-#[cfg(windows)]
-fn resolve_git_bash() -> Result<String, String> {
-    let bash = crate::terminal::which_bin("bash").ok_or_else(|| BASH_MISSING_MSG.to_string())?;
-    match Command::new(&bash).arg("--version").output() {
-        Ok(output) if output.status.success() => Ok(bash),
-        Ok(_) => Err(format!(
-            "{BASH_MISSING_MSG}\nFound `{bash}`, but it is not a working Bash installation \
-             (the Windows WSL launcher is not sufficient)."
-        )),
-        Err(err) => Err(format!(
-            "{BASH_MISSING_MSG}\nFound `{bash}`, but it could not be executed: {err}"
-        )),
-    }
-}
-#[cfg(windows)]
-const BASH_MISSING_MSG: &str = "Git Bash required to run shell (.sh) workflow scripts — install it and ensure `bash` is on PATH.";
-
-fn python_command() -> Result<Command, String> {
-    if let Ok(program) = std::env::var("PYTHON")
-        && !program.trim().is_empty()
-    {
-        return Ok(Command::new(program));
-    }
-
-    #[cfg(windows)]
-    {
-        for (name, args) in [("python", &[][..]), ("py", &["-3"][..])] {
-            let Some(program) = crate::terminal::which_bin(name) else {
-                continue;
-            };
-            let mut probe = Command::new(&program);
-            probe.args(args).arg("--version");
-            if probe.output().is_ok_and(|output| output.status.success()) {
-                let mut command = Command::new(program);
-                command.args(args);
-                return Ok(command);
-            }
-        }
-        Err(
-            "Python 3 is required to run .py workflow scripts. Install Python, set `PYTHON`, \
-             or ensure `python`/`py` is on PATH."
-                .to_string(),
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        Ok(Command::new("python3"))
-    }
-}
-
 #[derive(clap::Parser, Debug)]
 #[command(name = "run", about = "Run a bundled or user workflow script")]
 pub struct RunArgs {
@@ -292,15 +242,7 @@ fn write_embedded_to_temp(name: &str, content: &str) -> std::io::Result<tempfile
         .tempfile()?;
     tmp.write_all(content.as_bytes())?;
     tmp.flush()?;
-    // Make executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let metadata = tmp.as_file().metadata()?;
-        let mut perms = metadata.permissions();
-        perms.set_mode(0o755);
-        tmp.as_file().set_permissions(perms)?;
-    }
+    crate::sys::fs::set_executable(tmp.path())?;
     Ok(tmp)
 }
 
@@ -391,7 +333,7 @@ pub fn cmd_run(db: &HcomDb, args: &RunArgs, ctx: Option<&CommandContext>) -> i32
     match &script.source {
         ScriptSource::User { path } => {
             let mut cmd = if path.extension().and_then(|e| e.to_str()) == Some("py") {
-                let mut c = match python_command() {
+                let mut c = match crate::sys::process::python_command() {
                     Ok(command) => command,
                     Err(err) => {
                         eprintln!("{err}");
@@ -403,7 +345,7 @@ pub fn cmd_run(db: &HcomDb, args: &RunArgs, ctx: Option<&CommandContext>) -> i32
                 c
             } else {
                 #[cfg(windows)]
-                let bash = match resolve_git_bash() {
+                let bash = match crate::sys::process::resolve_git_bash() {
                     Ok(bash) => bash,
                     Err(err) => {
                         eprintln!("{err}");
@@ -442,7 +384,7 @@ pub fn cmd_run(db: &HcomDb, args: &RunArgs, ctx: Option<&CommandContext>) -> i32
             };
 
             #[cfg(windows)]
-            let bash = match resolve_git_bash() {
+            let bash = match crate::sys::process::resolve_git_bash() {
                 Ok(bash) => bash,
                 Err(err) => {
                     eprintln!("{err}");

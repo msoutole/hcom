@@ -24,7 +24,6 @@ use anyhow::{Context, Result, bail};
 #[cfg(unix)]
 use nix::errno::Errno;
 #[cfg(unix)]
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
 #[cfg(unix)]
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 #[cfg(unix)]
@@ -32,7 +31,7 @@ use nix::pty::openpty;
 #[cfg(unix)]
 use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
-use nix::unistd::{Pid, read, write};
+use nix::unistd::{Pid, read};
 #[cfg(unix)]
 use std::io;
 #[cfg(unix)]
@@ -711,7 +710,7 @@ impl Proxy {
         drop(pty.slave);
 
         // Set master to non-blocking
-        set_nonblocking(&pty.master)?;
+        crate::sys::io::set_nonblocking(&pty.master)?;
 
         // Create screen tracker (with instance name for debug logging)
         let screen = ScreenTracker::new_with_instance(
@@ -1027,7 +1026,7 @@ impl Proxy {
 
                     // Single write of all coalesced data
                     if !coalesced.is_empty() {
-                        write_all(&stdout_fd, &coalesced)?;
+                        crate::sys::io::write_all(&stdout_fd, &coalesced)?;
                         pending_utf8 = pending_utf8_bytes(&coalesced);
                         pending_escape = if coalesced.contains(&0x1b) {
                             has_pending_escape(&coalesced)
@@ -1167,9 +1166,9 @@ impl Proxy {
                             if self.config.target.name() == "copilot"
                                 && let Some(filtered) = focus_filtered
                             {
-                                write_all(&self.pty_master, &filtered)?;
+                                crate::sys::io::write_all(&self.pty_master, &filtered)?;
                             } else {
-                                write_all(&self.pty_master, &buf[..n])?;
+                                crate::sys::io::write_all(&self.pty_master, &buf[..n])?;
                             }
                         }
                         Err(Errno::EAGAIN) => {}
@@ -1203,7 +1202,7 @@ impl Proxy {
                 {
                     match self.inject_server.read_client(i)? {
                         inject::InjectResult::Inject(text) => {
-                            write_all(&self.pty_master, text.as_bytes())?;
+                            crate::sys::io::write_all(&self.pty_master, text.as_bytes())?;
                             // Injected keystrokes reach the PTY master directly and
                             // bypass the interactive stdin handler. When one answers a
                             // pending approval, publish the cleared edge synchronously
@@ -1261,7 +1260,7 @@ impl Proxy {
                 {
                     let escape =
                         shared::build_title_escape(&name, &status, self.config.target.name());
-                    write_all(&stdout_fd, escape.as_bytes())?;
+                    crate::sys::io::write_all(&stdout_fd, escape.as_bytes())?;
                     last_written_name = name;
                     last_written_status = status;
                 }
@@ -1272,7 +1271,7 @@ impl Proxy {
         if stdout_is_tty {
             let remaining = title_filter.flush();
             if !remaining.is_empty() {
-                let _ = write_all(&stdout_fd, &remaining);
+                let _ = crate::sys::io::write_all(&stdout_fd, &remaining);
             }
         }
 
@@ -1388,7 +1387,7 @@ impl Proxy {
                             Err(_) => break,
                         }
                     }
-                    return Ok(exit_code_from_status(status));
+                    return Ok(crate::sys::process::exit_code_from_status(status));
                 }
                 Ok(None) => {} // Still running
                 Err(e) => bail!("wait failed: {}", e),
@@ -1398,7 +1397,7 @@ impl Proxy {
                 return self
                     .child
                     .wait()
-                    .map(exit_code_from_status)
+                    .map(crate::sys::process::exit_code_from_status)
                     .map_err(|e| anyhow::anyhow!("wait failed: {e}"));
             }
 
@@ -1410,7 +1409,9 @@ impl Proxy {
                 let kill_deadline = Instant::now() + Duration::from_secs(2);
                 while Instant::now() < kill_deadline {
                     match self.child.try_wait() {
-                        Ok(Some(status)) => return Ok(exit_code_from_status(status)),
+                        Ok(Some(status)) => {
+                            return Ok(crate::sys::process::exit_code_from_status(status));
+                        }
                         Ok(None) => std::thread::sleep(Duration::from_millis(50)),
                         Err(e) => bail!("wait after SIGKILL failed: {}", e),
                     }
@@ -1478,44 +1479,6 @@ impl Drop for Proxy {
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn exit_code_from_status(status: ExitStatus) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    if let Some(code) = status.code() {
-        code
-    } else if let Some(signal) = status.signal() {
-        128 + signal
-    } else {
-        1
-    }
-}
-
-#[cfg(unix)]
-fn set_nonblocking<Fd: AsFd>(fd: &Fd) -> Result<()> {
-    let flags = fcntl(fd.as_fd(), FcntlArg::F_GETFL).context("fcntl F_GETFL failed")?;
-    let flags = OFlag::from_bits_truncate(flags);
-    fcntl(fd.as_fd(), FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
-        .context("fcntl F_SETFL failed")?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn write_all<F: AsFd>(fd: &F, data: &[u8]) -> Result<()> {
-    let mut written = 0;
-    while written < data.len() {
-        match write(fd, &data[written..]) {
-            Ok(n) => written += n,
-            Err(Errno::EINTR) => continue,
-            Err(Errno::EAGAIN) => {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                continue;
-            }
-            Err(e) => bail!("write failed: {}", e),
-        }
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
