@@ -1,7 +1,5 @@
 //! Omp Coding Agent hook handlers — argv-based lifecycle plus TypeScript plugin.
 
-use std::time::Instant;
-
 use serde_json::Value;
 
 use crate::bootstrap;
@@ -13,8 +11,45 @@ use crate::log::{log_error, log_info};
 use crate::shared::ST_LISTENING;
 use crate::shared::context::HcomContext;
 
+use super::HookPayload;
 use super::common;
 use super::common::finalize_session;
+use super::handler::{HookHandler, HookInputKind, run_hook_handler};
+
+/// Hook handler for Omp Coding Agent (argv-based lifecycle dispatch).
+struct OmpHookHandler;
+
+impl HookHandler for OmpHookHandler {
+    fn tool_name(&self) -> &'static str {
+        "omp"
+    }
+
+    fn input_kind(&self) -> HookInputKind {
+        HookInputKind::Argv
+    }
+
+    fn dispatch(
+        &self,
+        hook_name: &str,
+        ctx: &HcomContext,
+        db: &HcomDb,
+        _payload: &HookPayload,
+        argv: &[String],
+    ) -> (i32, String) {
+        match hook_name {
+            "omp-start" => handle_start(ctx, db, argv),
+            "omp-status" => handle_status(db, argv),
+            "omp-read" => handle_read(db, argv),
+            "omp-beforetool" => handle_beforetool(db, argv),
+            "omp-stop" => handle_stop(db, argv),
+            _ => (
+                0,
+                serde_json::json!({"error": format!("Unknown Omp hook: {}", hook_name)})
+                    .to_string(),
+            ),
+        }
+    }
+}
 
 fn parse_flag(argv: &[String], flag: &str) -> Option<String> {
     argv.iter()
@@ -280,65 +315,7 @@ fn handle_stop(db: &HcomDb, argv: &[String]) -> (i32, String) {
 }
 
 pub fn dispatch_omp_hook(hook_name: &str, argv: &[String]) -> (i32, String) {
-    let start = Instant::now();
-    let ctx = HcomContext::from_os();
-    crate::paths::ensure_hcom_directories_at(&ctx.hcom_dir);
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(e) => {
-            log_error(
-                "hooks",
-                "hook.error",
-                &format!("hook={} op=db_open err={}", hook_name, e),
-            );
-            return (
-                0,
-                serde_json::json!({"error": format!("DB open failed: {}", e)}).to_string(),
-            );
-        }
-    };
-    if !common::hook_gate_check(&ctx, &db) {
-        return (0, String::new());
-    }
-    let handler_argv: Vec<String> = if !argv.is_empty() && argv[0] == hook_name {
-        argv[1..].to_vec()
-    } else {
-        argv.to_vec()
-    };
-    let hook_name_owned = hook_name.to_string();
-    let handler_start = Instant::now();
-    let (exit_code, output) = common::dispatch_with_panic_guard(
-        "omp",
-        &hook_name_owned,
-        (
-            0,
-            serde_json::json!({"error": "internal panic"}).to_string(),
-        ),
-        || match hook_name_owned.as_str() {
-            "omp-start" => handle_start(&ctx, &db, &handler_argv),
-            "omp-status" => handle_status(&db, &handler_argv),
-            "omp-read" => handle_read(&db, &handler_argv),
-            "omp-beforetool" => handle_beforetool(&db, &handler_argv),
-            "omp-stop" => handle_stop(&db, &handler_argv),
-            _ => (
-                0,
-                serde_json::json!({"error": format!("Unknown Omp hook: {}", hook_name_owned)})
-                    .to_string(),
-            ),
-        },
-    );
-    log_info(
-        "hooks",
-        "omp.dispatch.timing",
-        &format!(
-            "hook={} handler_ms={:.2} total_ms={:.2} exit_code={}",
-            hook_name,
-            handler_start.elapsed().as_secs_f64() * 1000.0,
-            start.elapsed().as_secs_f64() * 1000.0,
-            exit_code
-        ),
-    );
-    (exit_code, output)
+    run_hook_handler(&OmpHookHandler, hook_name, argv)
 }
 
 pub const PLUGIN_SOURCE: &str = include_str!("../omp_plugin/hcom.ts");

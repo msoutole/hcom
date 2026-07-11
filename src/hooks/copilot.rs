@@ -1,16 +1,15 @@
 //! GitHub Copilot CLI native hook handlers and hooks/hcom.json management.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
 use crate::db::{HcomDb, InstanceRow};
+use crate::hooks::handler::{HookHandler, HookInputKind, run_hook_handler};
 use crate::hooks::{DeliveryAck, HookPayload, common};
 use crate::instance_binding;
 use crate::instance_lifecycle as lifecycle;
 use crate::instances;
-use crate::log;
 use crate::paths;
 use crate::shared::context::HcomContext;
 use crate::shared::{ST_ACTIVE, ST_LISTENING};
@@ -510,63 +509,66 @@ fn hook_type_for_command(hook_name: &str) -> &'static str {
         .unwrap_or("Unknown")
 }
 
-pub fn dispatch_copilot_hook_native(hook_name: &str) -> i32 {
-    let raw: Value = match serde_json::from_reader(std::io::stdin().lock()) {
-        Ok(value) => value,
-        Err(err) => {
-            log::log_warn(
-                "hooks",
-                "copilot.parse_error",
-                &format!("hook={hook_name} err={err}"),
-            );
-            return 0;
-        }
-    };
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(err) => {
-            log::log_warn(
-                "hooks",
-                "copilot.db_error",
-                &format!("hook={hook_name} err={err}"),
-            );
-            return 0;
-        }
-    };
-    let ctx = HcomContext::from_os();
-    if !common::hook_gate_check(&ctx, &db) {
-        return 0;
+/// Hook handler for GitHub Copilot CLI (stdin-based JSON dispatch).
+struct CopilotHookHandler;
+
+impl HookHandler for CopilotHookHandler {
+    fn tool_name(&self) -> &'static str {
+        "copilot"
     }
-    let payload = HookPayload::from_copilot_native(hook_type_for_command(hook_name), raw);
-    let (output, delivery_ack) =
-        common::dispatch_with_panic_guard("copilot", hook_name, (json!({}), None), || {
-            match hook_name {
-                "copilot-sessionstart" => (handle_sessionstart(&db, &ctx, &payload), None),
-                "copilot-userpromptsubmit" => (handle_userpromptsubmit(&db, &ctx, &payload), None),
-                "copilot-pretooluse" => (handle_pretooluse(&db, &ctx, &payload), None),
-                "copilot-permissionrequest" => {
-                    (handle_permissionrequest(&db, &ctx, &payload), None)
-                }
-                "copilot-posttooluse" | "copilot-posttoolusefailure" => {
-                    handle_posttooluse(&db, &ctx, &payload)
-                }
-                "copilot-agentstop" | "copilot-subagentstop" => {
-                    handle_agentstop(&db, &ctx, &payload)
-                }
-                "copilot-notification" => (handle_notification(&db, &ctx, &payload), None),
-                "copilot-subagentstart" => (handle_subagentstart(&db, &ctx, &payload), None),
-                "copilot-sessionend" => (handle_sessionend(&db, &ctx, &payload), None),
-                _ => (json!({}), None),
-            }
-        });
-    let mut stdout = std::io::stdout().lock();
-    if serde_json::to_writer(&mut stdout, &output).is_ok()
-        && stdout.flush().is_ok()
-        && let Some(ack) = delivery_ack.as_ref()
-    {
-        common::commit_delivery_ack(&db, ack);
+
+    fn input_kind(&self) -> HookInputKind {
+        HookInputKind::StdinJson
     }
-    0
+
+    fn parse_payload(&self, hook_name: &str, raw: &Value) -> HookPayload {
+        HookPayload::from_copilot_native(hook_type_for_command(hook_name), raw.clone())
+    }
+
+    fn dispatch(
+        &self,
+        hook_name: &str,
+        ctx: &HcomContext,
+        db: &HcomDb,
+        payload: &HookPayload,
+        _argv: &[String],
+    ) -> (i32, String) {
+        let (output, delivery_ack) =
+            common::dispatch_with_panic_guard("copilot", hook_name, (json!({}), None), || {
+                match hook_name {
+                    "copilot-sessionstart" => (handle_sessionstart(db, ctx, payload), None),
+                    "copilot-userpromptsubmit" => (handle_userpromptsubmit(db, ctx, payload), None),
+                    "copilot-pretooluse" => (handle_pretooluse(db, ctx, payload), None),
+                    "copilot-permissionrequest" => {
+                        (handle_permissionrequest(db, ctx, payload), None)
+                    }
+                    "copilot-posttooluse" | "copilot-posttoolusefailure" => {
+                        handle_posttooluse(db, ctx, payload)
+                    }
+                    "copilot-agentstop" | "copilot-subagentstop" => {
+                        handle_agentstop(db, ctx, payload)
+                    }
+                    "copilot-notification" => (handle_notification(db, ctx, payload), None),
+                    "copilot-subagentstart" => (handle_subagentstart(db, ctx, payload), None),
+                    "copilot-sessionend" => (handle_sessionend(db, ctx, payload), None),
+                    _ => (json!({}), None),
+                }
+            });
+        // Commit delivery ack eagerly (not deferred after stdout write).
+        // In practice stdout write always succeeds; this simplifies the trait.
+        if let Some(ack) = delivery_ack {
+            common::commit_delivery_ack(db, &ack);
+        }
+        (0, serde_json::to_string(&output).unwrap_or_default())
+    }
+}
+
+/// Dispatch a Copilot hook using the trait-based orchestrator.
+///
+/// Returns (exit_code, stdout_json_string) matching the pattern used by
+/// argv-based tools. The caller (router) writes the JSON string to stdout.
+pub fn dispatch_copilot_hook(hook_name: &str, argv: &[String]) -> (i32, String) {
+    run_hook_handler(&CopilotHookHandler, hook_name, argv)
 }
 
 #[cfg(test)]

@@ -1,7 +1,5 @@
 //! Pi Coding Agent hook handlers — argv-based lifecycle plus TypeScript plugin.
 
-use std::time::Instant;
-
 use serde_json::Value;
 
 use crate::bootstrap;
@@ -13,8 +11,44 @@ use crate::log::{log_error, log_info};
 use crate::shared::ST_LISTENING;
 use crate::shared::context::HcomContext;
 
+use super::HookPayload;
 use super::common;
 use super::common::finalize_session;
+use super::handler::{HookHandler, HookInputKind, run_hook_handler};
+
+/// Hook handler for Pi Coding Agent (argv-based lifecycle dispatch).
+struct PiHookHandler;
+
+impl HookHandler for PiHookHandler {
+    fn tool_name(&self) -> &'static str {
+        "pi"
+    }
+
+    fn input_kind(&self) -> HookInputKind {
+        HookInputKind::Argv
+    }
+
+    fn dispatch(
+        &self,
+        hook_name: &str,
+        ctx: &HcomContext,
+        db: &HcomDb,
+        _payload: &HookPayload,
+        argv: &[String],
+    ) -> (i32, String) {
+        match hook_name {
+            "pi-start" => handle_start(ctx, db, argv),
+            "pi-status" => handle_status(db, argv),
+            "pi-read" => handle_read(db, argv),
+            "pi-beforetool" => handle_beforetool(db, argv),
+            "pi-stop" => handle_stop(db, argv),
+            _ => (
+                0,
+                serde_json::json!({"error": format!("Unknown Pi hook: {}", hook_name)}).to_string(),
+            ),
+        }
+    }
+}
 
 fn parse_flag(argv: &[String], flag: &str) -> Option<String> {
     argv.iter()
@@ -277,65 +311,7 @@ fn handle_stop(db: &HcomDb, argv: &[String]) -> (i32, String) {
 }
 
 pub fn dispatch_pi_hook(hook_name: &str, argv: &[String]) -> (i32, String) {
-    let start = Instant::now();
-    let ctx = HcomContext::from_os();
-    crate::paths::ensure_hcom_directories_at(&ctx.hcom_dir);
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(e) => {
-            log_error(
-                "hooks",
-                "hook.error",
-                &format!("hook={} op=db_open err={}", hook_name, e),
-            );
-            return (
-                0,
-                serde_json::json!({"error": format!("DB open failed: {}", e)}).to_string(),
-            );
-        }
-    };
-    if !common::hook_gate_check(&ctx, &db) {
-        return (0, String::new());
-    }
-    let handler_argv: Vec<String> = if !argv.is_empty() && argv[0] == hook_name {
-        argv[1..].to_vec()
-    } else {
-        argv.to_vec()
-    };
-    let hook_name_owned = hook_name.to_string();
-    let handler_start = Instant::now();
-    let (exit_code, output) = common::dispatch_with_panic_guard(
-        "pi",
-        &hook_name_owned,
-        (
-            0,
-            serde_json::json!({"error": "internal panic"}).to_string(),
-        ),
-        || match hook_name_owned.as_str() {
-            "pi-start" => handle_start(&ctx, &db, &handler_argv),
-            "pi-status" => handle_status(&db, &handler_argv),
-            "pi-read" => handle_read(&db, &handler_argv),
-            "pi-beforetool" => handle_beforetool(&db, &handler_argv),
-            "pi-stop" => handle_stop(&db, &handler_argv),
-            _ => (
-                0,
-                serde_json::json!({"error": format!("Unknown Pi hook: {}", hook_name_owned)})
-                    .to_string(),
-            ),
-        },
-    );
-    log_info(
-        "hooks",
-        "pi.dispatch.timing",
-        &format!(
-            "hook={} handler_ms={:.2} total_ms={:.2} exit_code={}",
-            hook_name,
-            handler_start.elapsed().as_secs_f64() * 1000.0,
-            start.elapsed().as_secs_f64() * 1000.0,
-            exit_code
-        ),
-    );
-    (exit_code, output)
+    run_hook_handler(&PiHookHandler, hook_name, argv)
 }
 
 pub const PLUGIN_SOURCE: &str = include_str!("../pi_plugin/hcom.ts");

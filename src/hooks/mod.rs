@@ -9,6 +9,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod family;
 pub mod gemini;
+pub mod handler;
 pub mod kimi;
 pub mod opencode;
 pub mod pi;
@@ -205,7 +206,7 @@ pub struct DeliveryAck {
 /// Each tool's raw hook JSON is different. Factory methods normalize into
 /// this common struct so shared functions work identically across tools.
 ///
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HookPayload {
     /// Claude/Gemini session ID, Codex thread ID. None if not provided.
     pub session_id: Option<String>,

@@ -3,7 +3,6 @@
 //! 10 hook types: sessionstart, userpromptsubmit, pre, post, poll,
 //! notify, permission-request, subagent-start, subagent-stop, sessionend.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -16,6 +15,7 @@ use crate::config::HcomConfig;
 use crate::db::{HcomDb, InstanceRow};
 use crate::hooks::common;
 use crate::hooks::family;
+use crate::hooks::handler;
 use crate::hooks::{DeliveryAck, HookPayload};
 use crate::instance_binding;
 use crate::instance_lifecycle as lifecycle;
@@ -45,66 +45,23 @@ const HOOK_POLL: &str = "poll";
 /// Returns exit code (0 = success/non-participant, 2 = message delivered).
 ///
 pub fn dispatch_claude_hook(hook_type: &str) -> i32 {
-    let start = Instant::now();
-
-    // Read stdin JSON
-    let mut input = Vec::new();
-    if let Err(e) = std::io::stdin().read_to_end(&mut input) {
-        log::log_error(
-            "hooks",
-            "claude.stdin_error",
-            &format!("hook={} err={}", hook_type, e),
-        );
+    let Some(dp) = handler::prepare_stdin("claude", hook_type) else {
         return 0;
-    }
-
-    let raw: Value = match serde_json::from_slice(&input) {
-        Ok(v) => v,
-        Err(e) => {
-            log::log_error(
-                "hooks",
-                "claude.parse_error",
-                &format!("hook={} err={}", hook_type, e),
-            );
-            return 0;
-        }
     };
 
-    // Open DB (includes schema migration/compat check)
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(e) => {
-            log::log_warn(
-                "hooks",
-                "claude.db_error",
-                &format!("hook={} err={}", hook_type, e),
-            );
-            return 0;
-        }
-    };
-
-    // Build context from environment
-    let ctx = HcomContext::from_os();
-
-    // Pre-gate: non-participants with empty DB → exit 0, no output
-    if !common::hook_gate_check(&ctx, &db) {
-        return 0;
-    }
-
-    // Build payload
-    let mut payload = HookPayload::from_claude(raw);
+    let mut payload = HookPayload::from_claude(dp.raw);
 
     let (exit_code, stdout, delivery_ack, timing) = common::dispatch_with_panic_guard(
         "claude",
         hook_type,
         (0, String::new(), None, DispatchTiming::default()),
-        || route_claude_hook(&db, &ctx, hook_type, &mut payload),
+        || route_claude_hook(&dp.db, &dp.ctx, hook_type, &mut payload),
     );
 
     // Output result
     if !stdout.is_empty() {
         let mut writer = std::io::stdout().lock();
-        if let Err(e) = write_hook_output(&db, &mut writer, &stdout, delivery_ack.as_ref()) {
+        if let Err(e) = write_hook_output(&dp.db, &mut writer, &stdout, delivery_ack.as_ref()) {
             log::log_error(
                 "hooks",
                 "claude.stdout_error",
@@ -113,7 +70,7 @@ pub fn dispatch_claude_hook(hook_type: &str) -> i32 {
         }
     }
 
-    let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = dp.start.elapsed().as_secs_f64() * 1000.0;
     let tool_name = payload.tool_name.as_str();
     log::log_info(
         "hooks",

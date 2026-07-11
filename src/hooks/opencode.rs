@@ -1,7 +1,5 @@
 //! OpenCode hook handlers — argv-based lifecycle management (start, status, read, stop).
 
-use std::time::Instant;
-
 use serde_json::Value;
 
 use crate::bootstrap;
@@ -13,8 +11,10 @@ use crate::log::{log_error, log_info};
 use crate::shared::ST_LISTENING;
 use crate::shared::context::HcomContext;
 
+use super::HookPayload;
 use super::common;
 use super::common::finalize_session;
+use super::handler::{HookHandler, HookInputKind, run_hook_handler};
 
 /// Extract `--flag value` from argv. Returns None if not found.
 fn parse_flag(argv: &[String], flag: &str) -> Option<String> {
@@ -466,84 +466,46 @@ fn handle_stop(db: &HcomDb, argv: &[String]) -> (i32, String) {
     (0, r#"{"ok":true}"#.to_string())
 }
 
+/// Hook handler for OpenCode (argv-based lifecycle dispatch).
+struct OpenCodeHookHandler;
+
+impl HookHandler for OpenCodeHookHandler {
+    fn tool_name(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn input_kind(&self) -> HookInputKind {
+        HookInputKind::Argv
+    }
+
+    fn dispatch(
+        &self,
+        hook_name: &str,
+        ctx: &HcomContext,
+        db: &HcomDb,
+        _payload: &HookPayload,
+        argv: &[String],
+    ) -> (i32, String) {
+        match hook_name {
+            "opencode-start" => handle_start(ctx, db, argv),
+            "opencode-status" => handle_status(db, argv),
+            "opencode-read" => handle_read(db, argv),
+            "opencode-stop" => handle_stop(db, argv),
+            _ => (
+                0,
+                serde_json::json!({"error": format!("Unknown OpenCode hook: {}", hook_name)})
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 /// Dispatch an OpenCode hook by name.
 ///
 /// Returns (exit_code, stdout_output).
 /// All OpenCode hooks return exit 0 (no blocking behavior).
 pub fn dispatch_opencode_hook(hook_name: &str, argv: &[String]) -> (i32, String) {
-    let start = Instant::now();
-
-    // Build context
-    let ctx = HcomContext::from_os();
-
-    // Ensure hcom directories exist before opening DB.
-    // On clean HOME/HCOM_DIR the DB parent dir won't exist yet.
-    crate::paths::ensure_hcom_directories_at(&ctx.hcom_dir);
-
-    // Open DB (includes schema migration/compat)
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(e) => {
-            log_error(
-                "hooks",
-                "hook.error",
-                &format!("hook={} op=db_open err={}", hook_name, e),
-            );
-            return (
-                0,
-                serde_json::json!({"error": format!("DB open failed: {}", e)}).to_string(),
-            );
-        }
-    };
-
-    // Pre-gate: non-participants with empty DB → exit 0, no output
-    if !common::hook_gate_check(&ctx, &db) {
-        return (0, String::new());
-    }
-
-    // Strip hook name from argv to get handler args
-    // argv comes as: ["opencode-start", "--session-id", "abc", ...]
-    let handler_argv: Vec<String> = if !argv.is_empty() && argv[0] == hook_name {
-        argv[1..].to_vec()
-    } else {
-        argv.to_vec()
-    };
-
-    let handler_start = Instant::now();
-    let hook_name_owned = hook_name.to_string();
-
-    let (exit_code, output) = common::dispatch_with_panic_guard(
-        "opencode",
-        &hook_name_owned,
-        (
-            0,
-            serde_json::json!({"error": "internal panic"}).to_string(),
-        ),
-        || match hook_name_owned.as_str() {
-            "opencode-start" => handle_start(&ctx, &db, &handler_argv),
-            "opencode-status" => handle_status(&db, &handler_argv),
-            "opencode-read" => handle_read(&db, &handler_argv),
-            "opencode-stop" => handle_stop(&db, &handler_argv),
-            _ => (
-                0,
-                serde_json::json!({"error": format!("Unknown OpenCode hook: {}", hook_name_owned)})
-                    .to_string(),
-            ),
-        },
-    );
-
-    let handler_ms = handler_start.elapsed().as_secs_f64() * 1000.0;
-    let total_ms = start.elapsed().as_secs_f64() * 1000.0;
-    log_info(
-        "hooks",
-        "opencode.dispatch.timing",
-        &format!(
-            "hook={} handler_ms={:.2} total_ms={:.2} exit_code={}",
-            hook_name, handler_ms, total_ms, exit_code
-        ),
-    );
-
-    (exit_code, output)
+    run_hook_handler(&OpenCodeHookHandler, hook_name, argv)
 }
 
 /// Embedded hcom.ts plugin source (compiled into the binary).

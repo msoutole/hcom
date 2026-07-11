@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::db::{HcomDb, InstanceRow};
+use crate::hooks::handler;
 use crate::hooks::{DeliveryAck, HookPayload, common};
 use crate::instance_binding;
 use crate::instance_lifecycle as lifecycle;
 use crate::instances;
-use crate::log;
 use crate::paths;
 use crate::shared::context::HcomContext;
 use crate::shared::{ST_ACTIVE, ST_LISTENING};
@@ -627,33 +627,11 @@ fn handle_sessionend(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> V
 
 /// Dispatch one Cursor JSON-on-stdin hook.
 pub fn dispatch_cursor_hook_native(hook_name: &str) -> i32 {
-    let raw: Value = match serde_json::from_reader(std::io::stdin().lock()) {
-        Ok(value) => value,
-        Err(err) => {
-            log::log_warn(
-                "hooks",
-                "cursor.parse_error",
-                &format!("hook={hook_name} err={err}"),
-            );
-            return 0;
-        }
-    };
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(err) => {
-            log::log_warn(
-                "hooks",
-                "cursor.db_error",
-                &format!("hook={hook_name} err={err}"),
-            );
-            return 0;
-        }
-    };
-    let ctx = HcomContext::from_os();
-    if !common::hook_gate_check(&ctx, &db) {
+    let Some(dp) = handler::prepare_stdin("cursor", hook_name) else {
         return 0;
-    }
-    let payload = HookPayload::from_cursor_native(hook_name, raw);
+    };
+
+    let payload = HookPayload::from_cursor_native(hook_name, dp.raw);
     // Fail-open panic fallback: `continue: true` guarantees a handler panic never
     // blocks the user's prompt on beforeSubmitPrompt. The extra key is ignored by
     // every other cursor hook (sessionStart accepts it explicitly; stop/sessionEnd/
@@ -663,12 +641,14 @@ pub fn dispatch_cursor_hook_native(hook_name: &str) -> i32 {
         hook_name,
         (json!({ "continue": true }), None),
         || match hook_name {
-            "cursor-sessionstart" => (handle_sessionstart(&db, &ctx, &payload), None),
-            "cursor-beforesubmitprompt" => (handle_beforesubmitprompt(&db, &ctx, &payload), None),
-            "cursor-pretooluse" => (handle_pretooluse(&db, &ctx, &payload), None),
-            "cursor-posttooluse" => handle_posttooluse(&db, &ctx, &payload),
-            "cursor-stop" => handle_stop(&db, &ctx, &payload),
-            "cursor-sessionend" => (handle_sessionend(&db, &ctx, &payload), None),
+            "cursor-sessionstart" => (handle_sessionstart(&dp.db, &dp.ctx, &payload), None),
+            "cursor-beforesubmitprompt" => {
+                (handle_beforesubmitprompt(&dp.db, &dp.ctx, &payload), None)
+            }
+            "cursor-pretooluse" => (handle_pretooluse(&dp.db, &dp.ctx, &payload), None),
+            "cursor-posttooluse" => handle_posttooluse(&dp.db, &dp.ctx, &payload),
+            "cursor-stop" => handle_stop(&dp.db, &dp.ctx, &payload),
+            "cursor-sessionend" => (handle_sessionend(&dp.db, &dp.ctx, &payload), None),
             _ => (json!({}), None),
         },
     );
@@ -677,7 +657,7 @@ pub fn dispatch_cursor_hook_native(hook_name: &str) -> i32 {
         && stdout.flush().is_ok()
         && let Some(ack) = delivery_ack.as_ref()
     {
-        common::commit_delivery_ack(&db, ack);
+        common::commit_delivery_ack(&dp.db, ack);
     }
     0
 }

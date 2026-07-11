@@ -4,14 +4,13 @@
 //! tables. Each hook receives JSON on stdin and uses exit code / stdout for
 //! results (0 = allow, 2 = block).
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use serde_json::{Value, json};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table};
 
 use crate::db::{HcomDb, InstanceRow};
+use crate::hooks::handler;
 use crate::hooks::{HookPayload, HookResult, common};
 use crate::instance_binding;
 use crate::instance_lifecycle as lifecycle;
@@ -751,62 +750,24 @@ fn get_handler(hook_name: &str) -> Option<fn(&HcomDb, &HcomContext, &HookPayload
 // ── Dispatch ────────────────────────────────────────────────────────────
 
 pub fn dispatch_kimi_hook(hook_name: &str) -> i32 {
-    let start = Instant::now();
-
-    let ctx = HcomContext::from_os();
-
-    let mut input = Vec::new();
-    if let Err(e) = std::io::stdin().read_to_end(&mut input) {
-        log::log_error(
-            "hooks",
-            "kimi.stdin_error",
-            &format!("hook={} err={}", hook_name, e),
-        );
+    let Some(dp) = handler::prepare_stdin("kimi", hook_name) else {
         return 0;
-    }
-
-    let raw: Value = match serde_json::from_slice(&input) {
-        Ok(v) => v,
-        Err(e) => {
-            log::log_error(
-                "hooks",
-                "kimi.parse_error",
-                &format!("hook={} err={}", hook_name, e),
-            );
-            return 0;
-        }
     };
 
-    let payload = HookPayload::from_kimi(hook_name, raw);
+    let payload = HookPayload::from_kimi(hook_name, dp.raw);
 
     // Pre-gate: skip UserPromptSubmit for non-participants
-    if !ctx.is_launched && hook_name == "kimi-userpromptsubmit" {
+    if !dp.ctx.is_launched && hook_name == "kimi-userpromptsubmit" {
         let sid = match payload.session_id.as_deref() {
             Some(sid) => sid,
             None => return 0,
         };
-        if let Ok(db) = HcomDb::open() {
-            if db.get_session_binding(sid).ok().flatten().is_none() {
-                return 0;
-            }
-        } else {
+        if dp.db.get_session_binding(sid).ok().flatten().is_none() {
             return 0;
         }
     }
 
     if !crate::paths::ensure_hcom_directories() {
-        return 0;
-    }
-
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(e) => {
-            log::log_error("hooks", "kimi.db.error", &format!("{}", e));
-            return 0;
-        }
-    };
-
-    if !common::hook_gate_check(&ctx, &db) {
         return 0;
     }
 
@@ -830,7 +791,7 @@ pub fn dispatch_kimi_hook(hook_name: &str) -> i32 {
             system_message: None,
             delivery_ack: None,
         },
-        || handler(&db, &ctx, &payload),
+        || handler(&dp.db, &dp.ctx, &payload),
     );
 
     let exit_code = match &result {
@@ -855,7 +816,7 @@ pub fn dispatch_kimi_hook(hook_name: &str) -> i32 {
             // kimi (stdout). Without this the PTY delivery loop never observes
             // the cursor advancing and keeps re-injecting `<hcom>`.
             if let Some(ack) = delivery_ack {
-                common::commit_delivery_ack(&db, &ack);
+                common::commit_delivery_ack(&dp.db, &ack);
             }
         }
         HookResult::Block { reason } => {
@@ -871,7 +832,7 @@ pub fn dispatch_kimi_hook(hook_name: &str) -> i32 {
         _ => {}
     }
 
-    let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = dp.start.elapsed().as_secs_f64() * 1000.0;
     log::log_info(
         "hooks",
         "kimi.dispatch.timing",

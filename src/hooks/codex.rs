@@ -20,6 +20,7 @@ use serde_json::Value;
 use toml_edit::{DocumentMut, Item, value};
 
 use crate::db::{HcomDb, InstanceRow};
+use crate::hooks::handler;
 use crate::hooks::{HookPayload, HookResult, common, family};
 use crate::instance_binding;
 use crate::instance_lifecycle as lifecycle;
@@ -446,45 +447,19 @@ fn dispatch_result_to_stdout(db: &HcomDb, hook_name: &str, result: HookResult) -
 
 /// Main entry point for native Codex hooks.
 pub fn dispatch_codex_hook_native(hook_name: &str) -> i32 {
-    let start = std::time::Instant::now();
-    let raw: Value = match serde_json::from_reader(std::io::stdin().lock()) {
-        Ok(v) => v,
-        Err(e) => {
-            log::log_error(
-                "hooks",
-                "codex.parse_error",
-                &format!("hook={hook_name} err={e}"),
-            );
-            return 0;
-        }
-    };
-
-    let db = match HcomDb::open() {
-        Ok(db) => db,
-        Err(e) => {
-            log::log_warn(
-                "hooks",
-                "codex.db_error",
-                &format!("hook={hook_name} err={e}"),
-            );
-            return 0;
-        }
-    };
-
-    let ctx = HcomContext::from_os();
-    if !common::hook_gate_check(&ctx, &db) {
+    let Some(dp) = handler::prepare_stdin("codex", hook_name) else {
         return 0;
-    }
+    };
 
-    let payload = HookPayload::from_codex_native(codex_event_name(hook_name), raw);
+    let payload = HookPayload::from_codex_native(codex_event_name(hook_name), dp.raw);
     let result = common::dispatch_with_panic_guard("codex", hook_name, hook_noop(), || {
         get_codex_handler(hook_name)
-            .map(|handler| handler(&db, &ctx, &payload))
+            .map(|handler| handler(&dp.db, &dp.ctx, &payload))
             .unwrap_or_else(hook_noop)
     });
 
-    let exit_code = dispatch_result_to_stdout(&db, hook_name, result);
-    let total_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let exit_code = dispatch_result_to_stdout(&dp.db, hook_name, result);
+    let total_ms = dp.start.elapsed().as_secs_f64() * 1000.0;
     log::log_info(
         "hooks",
         "codex.dispatch.timing",
