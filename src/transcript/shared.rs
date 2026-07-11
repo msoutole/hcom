@@ -507,3 +507,512 @@ pub fn summarize_action(text: &str) -> String {
         summary
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── truncate_str ──────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_str_no_truncation_needed() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_str_at_byte_boundary() {
+        assert_eq!(truncate_str("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_str_at_multi_byte_boundary() {
+        assert_eq!(truncate_str("héllo", 3), "hé");
+    }
+
+    #[test]
+    fn truncate_str_before_emoji() {
+        assert_eq!(truncate_str("a🔥b", 2), "a");
+    }
+
+    #[test]
+    fn truncate_str_empty() {
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    #[test]
+    fn truncate_str_max_zero() {
+        assert_eq!(truncate_str("abc", 0), "");
+    }
+
+    // ── normalize_tool_name ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_tool_name_bash_aliases() {
+        assert_eq!(normalize_tool_name("run_shell_command"), "Bash");
+        assert_eq!(normalize_tool_name("shell"), "Bash");
+        assert_eq!(normalize_tool_name("bash"), "Bash");
+    }
+
+    #[test]
+    fn normalize_tool_name_write_aliases() {
+        assert_eq!(normalize_tool_name("write_file"), "Write");
+        assert_eq!(normalize_tool_name("write"), "Write");
+    }
+
+    #[test]
+    fn normalize_tool_name_edit_aliases() {
+        assert_eq!(normalize_tool_name("edit_file"), "Edit");
+    }
+
+    #[test]
+    fn normalize_tool_name_read_aliases() {
+        assert_eq!(normalize_tool_name("read_file"), "Read");
+    }
+
+    #[test]
+    fn normalize_tool_name_skill_and_fetch() {
+        assert_eq!(normalize_tool_name("skill"), "Skill");
+        assert_eq!(normalize_tool_name("fetch"), "WebFetch");
+    }
+
+    #[test]
+    fn normalize_tool_name_unknown_passthrough() {
+        assert_eq!(normalize_tool_name("unknown_tool"), "unknown_tool");
+    }
+
+    // ── dedup_sorted_capped ───────────────────────────────────────────────
+
+    #[test]
+    fn dedup_sorted_capped_sorts_and_dedups() {
+        let input: Vec<String> = vec!["b".into(), "a".into(), "c".into()];
+        let result = dedup_sorted_capped(&input, 5);
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn dedup_sorted_capped_caps_at_limit() {
+        let input: Vec<String> = vec!["a".into(), "b".into(), "a".into(), "c".into()];
+        let result = dedup_sorted_capped(&input, 2);
+        assert_eq!(result, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn dedup_sorted_capped_all_duplicates() {
+        let input: Vec<String> = vec!["a".into(), "a".into(), "a".into()];
+        let result = dedup_sorted_capped(&input, 5);
+        assert_eq!(result, vec!["a"]);
+    }
+
+    #[test]
+    fn dedup_sorted_capped_empty() {
+        let input: Vec<String> = vec![];
+        let result = dedup_sorted_capped(&input, 5);
+        assert!(result.is_empty());
+    }
+
+    // ── same_trimmed_text ─────────────────────────────────────────────────
+
+    #[test]
+    fn same_trimmed_text_equal() {
+        assert!(same_trimmed_text("hello", "hello"));
+    }
+
+    #[test]
+    fn same_trimmed_text_with_whitespace() {
+        assert!(same_trimmed_text("  hello  ", "hello"));
+    }
+
+    #[test]
+    fn same_trimmed_text_different() {
+        assert!(!same_trimmed_text("hello", "world"));
+    }
+
+    // ── is_no_response_action ─────────────────────────────────────────────
+
+    #[test]
+    fn is_no_response_action_exact() {
+        assert!(is_no_response_action("(no response)"));
+    }
+
+    #[test]
+    fn is_no_response_action_with_trailing_space() {
+        assert!(is_no_response_action("(no response)  "));
+    }
+
+    #[test]
+    fn is_no_response_action_other_text() {
+        assert!(!is_no_response_action("hello"));
+    }
+
+    #[test]
+    fn is_no_response_action_empty() {
+        assert!(!is_no_response_action(""));
+    }
+
+    // ── is_error_result ──────────────────────────────────────────────────
+
+    #[test]
+    fn is_error_result_explicit_true() {
+        let v = json!({"is_error": true});
+        assert!(is_error_result(&v));
+    }
+
+    #[test]
+    fn is_error_result_explicit_false() {
+        let v = json!({"is_error": false});
+        assert!(!is_error_result(&v));
+    }
+
+    #[test]
+    fn is_error_result_no_error_text() {
+        let v = json!({"content": "some output"});
+        assert!(!is_error_result(&v));
+    }
+
+    #[test]
+    fn is_error_result_empty_object() {
+        let v = json!({});
+        assert!(!is_error_result(&v));
+    }
+
+    #[test]
+    fn is_error_result_traceback() {
+        let v = json!({"content": "Traceback (most recent call last)"});
+        assert!(is_error_result(&v));
+    }
+
+    #[test]
+    fn is_error_result_error_prefix() {
+        let v = json!({"content": "Error: something failed"});
+        assert!(is_error_result(&v));
+    }
+
+    // ── codex_is_error ────────────────────────────────────────────────────
+
+    #[test]
+    fn codex_is_error_empty() {
+        assert!(!codex_is_error(""));
+    }
+
+    #[test]
+    fn codex_is_error_exit_zero() {
+        assert!(!codex_is_error("Exit code: 0"));
+    }
+
+    #[test]
+    fn codex_is_error_exit_nonzero() {
+        assert!(codex_is_error("Exit code: 1"));
+    }
+
+    #[test]
+    fn codex_is_error_exit_zero_with_error_text() {
+        assert!(!codex_is_error("Exit code: 0\nsome error text"));
+    }
+
+    #[test]
+    fn codex_is_error_pattern_match() {
+        assert!(codex_is_error("failed to connect"));
+    }
+
+    // ── has_user_text ────────────────────────────────────────────────────
+
+    #[test]
+    fn has_user_text_string_content() {
+        let v = json!({"content": "hello"});
+        assert!(has_user_text(&v));
+    }
+
+    #[test]
+    fn has_user_text_empty_string() {
+        let v = json!({"content": ""});
+        assert!(!has_user_text(&v));
+    }
+
+    #[test]
+    fn has_user_text_only_whitespace() {
+        let v = json!({"content": "   "});
+        assert!(!has_user_text(&v));
+    }
+
+    #[test]
+    fn has_user_text_text_block() {
+        let v = json!({"content": [{"type": "text", "text": "hello"}]});
+        assert!(has_user_text(&v));
+    }
+
+    #[test]
+    fn has_user_text_tool_result_only() {
+        let v = json!({"content": [{"type": "tool_result", "text": "output"}]});
+        assert!(!has_user_text(&v));
+    }
+
+    #[test]
+    fn has_user_text_no_content() {
+        let v = json!({});
+        assert!(!has_user_text(&v));
+    }
+
+    // ── finalize_action_text ──────────────────────────────────────────────
+
+    #[test]
+    fn finalize_action_text_non_empty() {
+        assert_eq!(
+            finalize_action_text("hello world", &[], &[], false),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn finalize_action_text_empty_no_tools_no_error() {
+        assert_eq!(finalize_action_text("", &[], &[], false), "(no response)");
+    }
+
+    #[test]
+    fn finalize_action_text_tool_only_turn() {
+        let tools = vec![ToolUse {
+            name: "Bash".into(),
+            is_error: false,
+            file: None,
+            command: None,
+        }];
+        assert_eq!(
+            finalize_action_text("", &tools, &[], false),
+            "(tool-only turn: Bash)"
+        );
+    }
+
+    #[test]
+    fn finalize_action_text_ended_in_error() {
+        let errors = vec![json!("error")];
+        assert_eq!(
+            finalize_action_text("", &[], &errors, true),
+            "(turn ended in error)"
+        );
+    }
+
+    #[test]
+    fn finalize_action_text_ended_in_error_after_tools() {
+        let tools = vec![ToolUse {
+            name: "Bash".into(),
+            is_error: false,
+            file: None,
+            command: None,
+        }];
+        let errors = vec![json!("error")];
+        assert_eq!(
+            finalize_action_text("", &tools, &errors, true),
+            "(turn ended in error after using Bash)"
+        );
+    }
+
+    // ── summarize_tool_names ──────────────────────────────────────────────
+
+    #[test]
+    fn summarize_tool_names_empty() {
+        assert_eq!(summarize_tool_names(&[]), "tools");
+    }
+
+    #[test]
+    fn summarize_tool_names_one_tool() {
+        let tools = vec![ToolUse {
+            name: "Bash".into(),
+            is_error: false,
+            file: None,
+            command: None,
+        }];
+        assert_eq!(summarize_tool_names(&tools), "Bash");
+    }
+
+    #[test]
+    fn summarize_tool_names_multiple_tools() {
+        let tools = vec![
+            ToolUse {
+                name: "Bash".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+            ToolUse {
+                name: "Read".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+            ToolUse {
+                name: "Edit".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+        ];
+        assert_eq!(summarize_tool_names(&tools), "Bash, Read, Edit");
+    }
+
+    #[test]
+    fn summarize_tool_names_more_than_three() {
+        let tools = vec![
+            ToolUse {
+                name: "A".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+            ToolUse {
+                name: "B".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+            ToolUse {
+                name: "C".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+            ToolUse {
+                name: "D".into(),
+                is_error: false,
+                file: None,
+                command: None,
+            },
+        ];
+        assert_eq!(summarize_tool_names(&tools), "A, B, C, +1 more");
+    }
+
+    // ── extract_text_content ──────────────────────────────────────────────
+
+    #[test]
+    fn extract_text_content_string() {
+        let v = json!({"content": "hello"});
+        assert_eq!(extract_text_content(&v), "hello");
+    }
+
+    #[test]
+    fn extract_text_content_text_block() {
+        let v = json!({"content": [{"type": "text", "text": "hello"}]});
+        assert_eq!(extract_text_content(&v), "hello");
+    }
+
+    #[test]
+    fn extract_text_content_skips_tool_result() {
+        let v = json!({"content": [{"type": "tool_result", "text": "output"}]});
+        assert_eq!(extract_text_content(&v), "");
+    }
+
+    #[test]
+    fn extract_text_content_fallback_to_text() {
+        let v = json!({"text": "direct"});
+        assert_eq!(extract_text_content(&v), "direct");
+    }
+
+    #[test]
+    fn extract_text_content_empty() {
+        let v = json!({});
+        assert_eq!(extract_text_content(&v), "");
+    }
+
+    // ── extract_gemini_user_text ──────────────────────────────────────────
+
+    #[test]
+    fn extract_gemini_user_text_prefers_display_content() {
+        let v = json!({
+            "displayContent": [{"text": "hello"}],
+            "content": "fallback"
+        });
+        assert_eq!(extract_gemini_user_text(&v), "hello");
+    }
+
+    #[test]
+    fn extract_gemini_user_text_content_string() {
+        let v = json!({"content": "fallback"});
+        assert_eq!(extract_gemini_user_text(&v), "fallback");
+    }
+
+    #[test]
+    fn extract_gemini_user_text_content_array() {
+        let v = json!({"content": [{"text": "array text"}]});
+        assert_eq!(extract_gemini_user_text(&v), "array text");
+    }
+
+    // ── collapse_codex_duplicate_exchanges ────────────────────────────────
+
+    fn make_exchange(position: usize, user: &str, action: &str, files: Vec<&str>) -> Exchange {
+        Exchange {
+            position,
+            user: user.into(),
+            action: action.into(),
+            files: files.into_iter().map(String::from).collect(),
+            timestamp: String::new(),
+            tools: vec![],
+            edits: vec![],
+            errors: vec![],
+            ended_on_error: false,
+        }
+    }
+
+    #[test]
+    fn collapse_codex_duplicate_exchanges_empty() {
+        let result = collapse_codex_duplicate_exchanges(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn collapse_codex_duplicate_exchanges_single() {
+        let ex = make_exchange(1, "user", "hello", vec![]);
+        let result = collapse_codex_duplicate_exchanges(vec![ex]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].user, "user");
+        assert_eq!(result[0].action, "hello");
+    }
+
+    #[test]
+    fn collapse_codex_duplicate_exchanges_merges_identical() {
+        let ex1 = make_exchange(1, "user", "hello", vec!["a"]);
+        let ex2 = make_exchange(2, "user", "hello", vec!["b"]);
+        let result = collapse_codex_duplicate_exchanges(vec![ex1, ex2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].position, 1);
+        assert!(result[0].files.contains(&"a".to_string()));
+        assert!(result[0].files.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn collapse_codex_duplicate_exchanges_replaces_no_response() {
+        let ex1 = make_exchange(1, "user", "(no response)", vec!["a"]);
+        let ex2 = make_exchange(2, "user", "hello", vec!["b"]);
+        let result = collapse_codex_duplicate_exchanges(vec![ex1, ex2]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].action, "hello");
+        assert!(result[0].files.contains(&"a".to_string()));
+        assert!(result[0].files.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn collapse_codex_duplicate_exchanges_different_users_not_merged() {
+        let ex1 = make_exchange(1, "user1", "hello", vec![]);
+        let ex2 = make_exchange(2, "user2", "hello", vec![]);
+        let result = collapse_codex_duplicate_exchanges(vec![ex1, ex2]);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].position, 1);
+        assert_eq!(result[1].position, 2);
+    }
+
+    // ── format_structured_patch ────────────────────────────────────────────
+
+    #[test]
+    fn format_structured_patch_empty() {
+        assert_eq!(format_structured_patch(&[]), "");
+    }
+
+    #[test]
+    fn format_structured_patch_with_hunk() {
+        let patch = vec![json!({
+            "oldStart": 1,
+            "newStart": 2,
+            "lines": ["-old line", "+new line", " context"]
+        })];
+        let result = format_structured_patch(&patch);
+        assert_eq!(result, "@@ -1 +2 @@\n-old line\n+new line\n context");
+    }
+}
